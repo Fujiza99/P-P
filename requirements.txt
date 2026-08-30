@@ -1,5 +1,5 @@
-flask
-requests
 yfinance
-pandas
+line-bot-sdk
+flask
 gunicorn
+pandas
