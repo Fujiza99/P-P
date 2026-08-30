@@ -1,122 +1,107 @@
 import os
-import pandas as pd
-import requests
 import yfinance as yf
-from flask import Flask, jsonify, request
+import pandas as pd
+from flask import Flask, request, abort
+from linebot import LineBotApi, WebhookHandler
+from linebot.exceptions import InvalidSignatureError
+from linebot.models import MessageEvent, TextMessage, TextSendMessage
 
 app = Flask(__name__)
 
-LINE_ACCESS_TOKEN = os.environ.get("Etho4iyHRF+26XOAAYhY9PYgWK0hGGV+/9wRpORSvV7Q5aVOlwtvtDkLBWkYKyvLaDYHofQBUYXtD6YJ5lGeUGXnukyzo1+c6BD+hCycBXyg4Czs637y0gZEQK0e1N3X4SoLrUH1R89+29gGXlofYgdB04t89/1O/w1cDnyilFU=")
+# ใส่ Channel Access Token และ Channel Secret ของคุณตรงนี้ (หรือดึงจาก Env)
+LINE_ACCESS_TOKEN = os.environ.get(Etho4iyHRF+26XOAAYhY9PYgWK0hGGV+/9wRpORSvV7Q5aVOlwtvtDkLBWkYKyvLaDYHofQBUYXtD6YJ5lGeUGXnukyzo1+c6BD+hCycBXyg4Czs637y0gZEQK0e1N3X4SoLrUH1R89+29gGXlofYgdB04t89/1O/w1cDnyilFU=)
+LINE_CHANNEL_SECRET = os.environ.get("59177a4d4c5e0e538b3a62895b67756f")
 
+line_bot_api = LineBotApi(LINE_ACCESS_TOKEN)
+handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-def analyze_stock(ticker_symbol: str):
-    ticker_symbol = ticker_symbol.strip().upper()
+@app.route("/", methods=['GET'])
+def index():
+    return "Stock Line Bot is running!", 200
 
-    # รองรับหุ้นไทยอัตโนมัติ (ถ้าพิมพ์ชื่อหุ้นไทย 3-5 ตัวอักษร ให้เติม .BK)
-    if not ticker_symbol.endswith(".BK") and len(ticker_symbol) <= 5:
-        # ลองดึงข้อมูลเพื่อเช็คว่าเป็นหุ้นสหรัฐฯ หรือต้องเติม .BK
-        df_test = yf.download(
-            ticker_symbol, period="5d", progress=False, auto_adjust=False
-        )
-        if df_test.empty:
-            ticker_symbol = f"{ticker_symbol}.BK"
-
-    df = yf.download(
-        ticker_symbol,
-        period="1y",
-        interval="1d",
-        progress=False,
-        auto_adjust=False,
-    )
-
-    if df.empty or len(df) < 200:
-        return f"❌ ไม่พบข้อมูลหรือข้อมูลย้อนหลังของหุ้น {ticker_symbol} ไม่เพียงพอ"
-
-    if isinstance(df.columns, pd.MultiIndex):
-        close_series = df["Close"][ticker_symbol]
-        low_series = df["Low"][ticker_symbol]
-        high_series = df["High"][ticker_symbol]
-    else:
-        close_series = df["Close"]
-        low_series = df["Low"]
-        high_series = df["High"]
-
-    current_price = float(close_series.iloc[-1])
-
-    ema5 = float(close_series.ewm(span=5, adjust=False).mean().iloc[-1])
-    ema20 = float(close_series.ewm(span=20, adjust=False).mean().iloc[-1])
-    ema100 = float(close_series.ewm(span=100, adjust=False).mean().iloc[-1])
-    ema200 = float(close_series.ewm(span=200, adjust=False).mean().iloc[-1])
-
-    support = float(low_series.tail(30).min())
-    resistance = float(high_series.tail(30).max())
-
-    stop_loss = support * 0.98
-    target = resistance
-
-    risk = current_price - stop_loss
-    reward = target - current_price
-
-    if risk > 0 and reward > 0:
-        rr_ratio = round(reward / risk, 2)
-    else:
-        rr_ratio = 0.0
-
-    if rr_ratio >= 2.0:
-        status = f"✅ ผ่านเกณฑ์น่าสนใจ — R:R {rr_ratio} (เกิน 2.0 เท่า)"
-    else:
-        status = f"❌ ยังไม่ผ่านเกณฑ์ — R:R {rr_ratio} ต่ำกว่า 2.0"
-
-    report = (
-        f"📊 {ticker_symbol} — ราคาปัจจุบัน: {current_price:.2f}\n\n"
-        f"📈 เส้นค่าเฉลี่ย EMA:\n"
-        f"• EMA 5   : {ema5:.2f}\n"
-        f"• EMA 20  : {ema20:.2f}\n"
-        f"• EMA 100 : {ema100:.2f}\n"
-        f"• EMA 200 : {ema200:.2f}\n\n"
-        f"🟢 แนวรับ (Support): {support:.2f}\n"
-        f"🔴 แนวต้าน (Resistance): {resistance:.2f}\n\n"
-        f"🎯 เป้าทำกำไร: {target:.2f}\n"
-        f"🛑 จุดตัดขาดทุน: {stop_loss:.2f}\n"
-        f"⚖️ Risk:Reward: {rr_ratio}\n\n"
-        f"{status}"
-    )
-    return report
-
-
-def reply_line_message(reply_token: str, message: str):
-    url = "https://api.line.me/v2/bot/message/reply"
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {LINE_ACCESS_TOKEN}",
-    }
-    payload = {
-        "replyToken": reply_token,
-        "messages": [{"type": "text", "text": message}],
-    }
-    requests.post(url, headers=headers, json=payload)
-
-
-@app.route("/callback", methods=["POST"])
+@app.route("/callback", methods=['POST'])
 def callback():
-    body = request.get_json()
-    events = body.get("events", [])
+    signature = request.headers.get('X-Line-Signature', '')
+    body = request.get_data(as_text=True)
+    try:
+        handler.handle(body, signature)
+    except InvalidSignatureError:
+        abort(400)
+    except Exception as e:
+        print(f"Error handling webhook: {e}")
+        # ตอบรับ LINE 200 OK เสมอเพื่อไม่ให้ Webhook หลุด
+        return 'OK', 200
+    return 'OK', 200
 
-    for event in events:
-        if event.get("type") == "message":
-            msg_type = event["message"].get("type")
-            if msg_type == "text":
-                user_text = event["message"]["text"].strip()
-                reply_token = event["replyToken"]
+@handler.add(MessageEvent, message=TextMessage)
+def handle_message(event):
+    symbol = event.message.text.strip().upper()
+    
+    # เพิ่ม .BK ให้อัตโนมัติหากพิมพ์หุ้นไทย 4 ตัวอักษรที่ไม่ใช่หุ้นสหรัฐยอดนิยม
+    # เช่น พิมพ์ ADVANC หรือ SCB
+    search_symbol = symbol
+    if not symbol.endswith(".BK") and symbol not in ["NVDA", "GOOGL", "AAPL", "TSLA", "MSFT", "AMZN", "META"]:
+        search_symbol = f"{symbol}.BK"
 
-                # ส่งข้อความที่ผู้ใช้พิมพ์ไปวิเคราะห์
-                result_report = analyze_stock(user_text)
+    try:
+        ticker = yf.Ticker(search_symbol)
+        df = ticker.history(period="1y")
+        
+        # ถ้าดึงแบบมี .BK ไม่เจอ ให้ลองดึงแบบชื่อเพียวๆ (สำหรับหุ้น US)
+        if df.empty and search_symbol.endswith(".BK"):
+            search_symbol = symbol
+            ticker = yf.Ticker(search_symbol)
+            df = ticker.history(period="1y")
 
-                # ตอบกลับเข้า LINE แชทเดิมทันที
-                reply_line_message(reply_token, result_report)
+        if df.empty:
+            line_bot_api.reply_message(
+                event.reply_token,
+                TextSendMessage(text=f"❌ ไม่พบข้อมูลหุ้น '{symbol}' กรุณาเช็กชื่ออักษรอีกครั้งครับ")
+            )
+            return
 
-    return jsonify({"status": "ok"}), 200
+        # คำนวณ EMA
+        df['EMA5'] = df['Close'].ewm(span=5, adjust=False).mean()
+        df['EMA20'] = df['Close'].ewm(span=20, adjust=False).mean()
+        df['EMA100'] = df['Close'].ewm(span=100, adjust=False).mean()
+        df['EMA200'] = df['Close'].ewm(span=200, adjust=False).mean()
 
+        last_price = df['Close'].iloc[-1]
+        ema5 = df['EMA5'].iloc[-1]
+        ema20 = df['EMA20'].iloc[-1]
+        ema100 = df['EMA100'].iloc[-1]
+        ema200 = df['EMA200'].iloc[-1]
+
+        # คำนวณแนวรับ/แนวต้านเบื้องต้น (High/Low 20 วัน)
+        recent_high = df['High'].tail(20).max()
+        recent_low = df['Low'].tail(20).min()
+
+        reply_text = (
+            f"📊 ผลวิเคราะห์หุ้น: {search_symbol}\n"
+            f"-------------------\n"
+            f"💵 ราคาล่าสุด: {last_price:.2f}\n\n"
+            f"📈 เส้นเคลื่อนที่ EMA:\n"
+            f"• EMA 5   : {ema5:.2f}\n"
+            f"• EMA 20  : {ema20:.2f}\n"
+            f"• EMA 100 : {ema100:.2f}\n"
+            f"• EMA 200 : {ema200:.2f}\n\n"
+            f"🎯 กรอบแนวรับ-แนวต้าน (20 วัน):\n"
+            f"• แนวต้าน (High) : {recent_high:.2f}\n"
+            f"• แนวรับ (Low)   : {recent_low:.2f}"
+        )
+
+        line_bot_api.reply_message(
+            event.reply_token,
+            TextSendMessage(text=reply_text)
+        )
+
+    except Exception as e:
+        print(f"Error processing stock: {e}")
+        line_bot_api.reply_message(
+            event.reply_token,
+            TextSendMessage(text=f"⚠️ เกิดข้อผิดพลาดในการดึงข้อมูลหุ้น {symbol}\n({str(e)})")
+        )
 
 if __name__ == "__main__":
-    app.run(port=5000)
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
