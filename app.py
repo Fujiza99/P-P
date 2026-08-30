@@ -8,7 +8,7 @@ from linebot.models import MessageEvent, TextMessage, TextSendMessage
 
 app = Flask(__name__)
 
-# ใส่ Channel Access Token และ Channel Secret ของคุณตรงนี้ (หรือดึงจาก Env)
+# รหัส Channel Access Token และ Channel Secret
 LINE_ACCESS_TOKEN = "Etho4iyHRF+26XOAAYhY9PYgWK0hGGV+/9wRpORSvV7Q5aVOlwtvtDkLBWkYKyvLaDYHofQBUYXtD6YJ5lGeUGXnukyzo1+c6BD+hCycBXyg4Czs637y0gZEQK0e1N3X4SoLrUH1R89+29gGXlofYgdB04t89/1O/w1cDnyilFU="
 LINE_CHANNEL_SECRET = "59177a4d4c5e0e538b3a62895b67756f"
 
@@ -29,7 +29,6 @@ def callback():
         abort(400)
     except Exception as e:
         print(f"Error handling webhook: {e}")
-        # ตอบรับ LINE 200 OK เสมอเพื่อไม่ให้ Webhook หลุด
         return 'OK', 200
     return 'OK', 200
 
@@ -37,21 +36,20 @@ def callback():
 def handle_message(event):
     symbol = event.message.text.strip().upper()
     
-    # เพิ่ม .BK ให้อัตโนมัติหากพิมพ์หุ้นไทย 4 ตัวอักษรที่ไม่ใช่หุ้นสหรัฐยอดนิยม
-    # เช่น พิมพ์ ADVANC หรือ SCB
+    # ดึงข้อมูลราคาหุ้น
     search_symbol = symbol
-    if not symbol.endswith(".BK") and symbol not in ["NVDA", "GOOGL", "AAPL", "TSLA", "MSFT", "AMZN", "META"]:
-        search_symbol = f"{symbol}.BK"
+    ticker = yf.Ticker(search_symbol)
+    df = ticker.history(period="1y")
 
-    try:
+    # ถ้าค้นหาเพียวๆ ไม่เจอ และไม่ได้ลงท้ายด้วย .BK ให้ลองเติม .BK (สำหรับหุ้นไทย)
+    if df.empty and not search_symbol.endswith(".BK"):
+        search_symbol = f"{symbol}.BK"
         ticker = yf.Ticker(search_symbol)
         df = ticker.history(period="1y")
-        
-        # ถ้าดึงแบบมี .BK ไม่เจอ ให้ลองดึงแบบชื่อเพียวๆ (สำหรับหุ้น US)
-        if df.empty and search_symbol.endswith(".BK"):
-            search_symbol = symbol
-            ticker = yf.Ticker(search_symbol)
-            df = ticker.history(period="1y")
+
+    try:
+        # ตัดแถวที่ไม่มีข้อมูลราคา (NaN) ออก เพื่อป้องกันปัญหาแสดงผล "nan"
+        df = df.dropna(subset=['Close'])
 
         if df.empty:
             line_bot_api.reply_message(
@@ -60,19 +58,20 @@ def handle_message(event):
             )
             return
 
-        # คำนวณ EMA
+        # คำนวณค่า EMA
         df['EMA5'] = df['Close'].ewm(span=5, adjust=False).mean()
         df['EMA20'] = df['Close'].ewm(span=20, adjust=False).mean()
         df['EMA100'] = df['Close'].ewm(span=100, adjust=False).mean()
         df['EMA200'] = df['Close'].ewm(span=200, adjust=False).mean()
 
+        # ดึงราคาปิดและค่า EMA ล่าสุดที่ไม่ใช่ NaN
         last_price = df['Close'].iloc[-1]
         ema5 = df['EMA5'].iloc[-1]
         ema20 = df['EMA20'].iloc[-1]
         ema100 = df['EMA100'].iloc[-1]
         ema200 = df['EMA200'].iloc[-1]
 
-        # คำนวณแนวรับ/แนวต้านเบื้องต้น (High/Low 20 วัน)
+        # คำนวณแนวรับ-แนวต้าน (High/Low ในรอบ 20 วันล่าสุด)
         recent_high = df['High'].tail(20).max()
         recent_low = df['Low'].tail(20).min()
 
